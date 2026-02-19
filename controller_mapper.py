@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Xbox Controller Mapper",
     "author": "You",
-    "version": (2, 0),
+    "version": (2, 1),
     "blender": (5, 0, 0),
     "location": "View3D > Sidebar > Controller Mapper",
     "category": "Input"
@@ -17,56 +17,48 @@ from bpy.types import Panel, Operator, AddonPreferences, PropertyGroup
 # === XInput Fallback (Windows only) ===
 XINPUT_AVAILABLE = False
 try:
-    if bpy.app.version >= (5, 0, 0):
-        # Future-proof: check for native input devices first
-        try:
-            _devices = list(bpy.context.window_manager.input_devices)
-            if any("Xbox" in dev.name for dev in _devices):
-                XINPUT_AVAILABLE = "native"
-        except Exception:
-            pass
+    if platform := __import__('platform').system() == "Windows":
+        class XINPUT_GAMEPAD(ctypes.Structure):
+            _fields_ = [
+                ("wButtons", ctypes.c_ushort),
+                ("bLeftTrigger", ctypes.c_byte),
+                ("bRightTrigger", ctypes.c_byte),
+                ("sThumbLX", ctypes.c_short),
+                ("sThumbLY", ctypes.c_short),
+                ("sThumbRX", ctypes.c_short),
+                ("sThumbRY", ctypes.c_short),
+            ]
 
-    if not XINPUT_AVAILABLE:
-        import ctypes, platform
-        if platform.system() == "Windows":
-            class XINPUT_GAMEPAD(ctypes.Structure):
-                _fields_ = [
-                    ("wButtons", ctypes.c_ushort),
-                    ("bLeftTrigger", ctypes.c_byte),
-                    ("bRightTrigger", ctypes.c_byte),
-                    ("sThumbLX", ctypes.c_short),
-                    ("sThumbLY", ctypes.c_short),
-                    ("sThumbRX", ctypes.c_short),
-                    ("sThumbRY", ctypes.c_short),
-                ]
+        class XINPUT_STATE(ctypes.Structure):
+            _fields_ = [
+                ("dwPacketNumber", ctypes.c_uint32),
+                ("Gamepad", XINPUT_GAMEPAD)
+            ]
 
-            class XINPUT_STATE(ctypes.Structure):
-                _fields_ = [
-                    ("dwPacketNumber", ctypes.c_uint32),
-                    ("Gamepad", XINPUT_GAMEPAD)
-                ]
+        xinput = __import__('ctypes').WinDLL("XInput1_4.dll")
+        xinput.XInputGetState.argtypes = [ctypes.c_uint, ctypes.POINTER(XINPUT_STATE)]
+        xinput.XInputGetState.restype = ctypes.c_uint
 
-            xinput = ctypes.WinDLL("XInput1_4.dll")
-            xinput.XInputGetState.argtypes = [ctypes.c_uint, ctypes.POINTER(XINPUT_STATE)]
-            xinput.XInputGetState.restype = ctypes.c_uint
+        def get_xinput_state(user_index=0):
+            state = XINPUT_STATE()
+            if xinput.XInputGetState(user_index, ctypes.byref(state)) == 0:
+                return state
+            return None
 
-            def get_xinput_state(user_index=0):
-                state = XINPUT_STATE()
-                if xinput.XInputGetState(user_index, ctypes.byref(state)) == 0:
-                    return state
-                return None
-
-            XINPUT_AVAILABLE = True
-        else:
-            print("⚠️  XInput only supported on Windows in this build.")
+        XINPUT_AVAILABLE = True
 except Exception as e:
     XINPUT_AVAILABLE = False
+
+
+# === FIXED: Key wrapper for collections ===
+class ControllerKey(PropertyGroup):
+    value: StringProperty(name="Key", default="")
 
 
 # === Combo Mapping ===
 class ControllerComboMapping(PropertyGroup):
     name: StringProperty(name="Combo Name", default="")
-    keys: CollectionProperty(type=StringProperty)
+    keys: CollectionProperty(type=ControllerKey)  # ✅ Now valid!
     operator: StringProperty(name="Operator ID", default="")
     args_json: StringProperty(name="Args (JSON)", default='{}')
     hold_time: FloatProperty(default=0.2, min=0.05, max=2.0)
@@ -110,8 +102,7 @@ class ControllerMapperPreferences(AddonPreferences):
         if not XINPUT_AVAILABLE:
             box = layout.box()
             box.alert = True
-            box.label(text="XInput not available", icon='ERROR')
-            box.label(text="Windows only for raw controller access")
+            box.label(text="XInput only available on Windows", icon='ERROR')
             box.operator("wm.open_url", text="Learn More").url = "https://docs.microsoft.com/en-us/windows/win32/xinput/"
 
         row = layout.row(align=True)
@@ -142,12 +133,14 @@ class WM_OT_controller_preset_apply(Operator):
             prefs.deadzone = 0.12
 
             c = prefs.combos.add()
-            c.name, k1, k2, k3 = "Maya Pan", *([c.keys.add() for _ in range(3)])
+            c.name = "Maya Pan"
+            k1, k2, k3 = [c.keys.add() for _ in range(3)]
             k1.value, k2.value, k3.value = "ABS_X", "ABS_Y", "BTN_SOUTH"
             c.operator, c.args_json, c.hold_time = "view3d.view_pan", '{"offset": [0, 50]}', 0.2
 
             c = prefs.combos.add()
-            c.name, k1, k2, k3 = "Maya Orbit", *([c.keys.add() for _ in range(3)])
+            c.name = "Maya Orbit"
+            k1, k2, k3 = [c.keys.add() for _ in range(3)]
             k1.value, k2.value, k3.value = "ABS_X", "ABS_Y", "BTN_EAST"
             c.operator, c.args_json, c.hold_time = "view3d.view_rotate", '{}', 0.2
 
@@ -155,15 +148,15 @@ class WM_OT_controller_preset_apply(Operator):
             prefs.axis_sensitivity = 1.2
             prefs.deadzone = 0.15
 
-            for axis in [("ABS_X", "move X"), ("ABS_Y", "move Y")]:
+            for code in ["ABS_X", "ABS_Y"]:
                 c = prefs.combos.add()
-                c.name, k = f"Unity {axis[1]}", c.keys.add()
-                k.value, c.operator, c.hold_time = axis[0], "view3d.view_pan", 0.0
+                k = c.keys.add()
+                k.value, c.operator, c.hold_time = code, "view3d.view_pan", 0.0
 
         return {'FINISHED'}
 
 
-# === Input Polling (XInput or fallback) ===
+# === Input Polling (XInput only) ===
 class WM_OT_toggle_controller_mode(Operator):
     bl_idname = "wm.toggle_controller_mode"
     bl_label = "Toggle Controller Mode"
@@ -179,34 +172,29 @@ class WM_OT_toggle_controller_mode(Operator):
         if not self._active:
             return {'PASS_THROUGH'}
 
-        # Poll XInput state (Windows only)
         try:
-            if XINPUT_AVAILABLE and isinstance(XINPUT_AVAILABLE, bool):
-                state = get_xinput_state()
-                if state:
-                    gp = state.Gamepad
-                    events = []
+            if XINPUT_AVAILABLE and (state := get_xinput_state()):
+                gp = state.Gamepad
+                events = []
 
-                    # Buttons
-                    btns = [
-                        ("BTN_SOUTH", 0x0001), ("BTN_EAST", 0x0002),
-                        ("BTN_NORTH", 0x0010), ("BTN_WEST", 0x0008)
-                    ]
-                    for code, mask in btns:
-                        state = (gp.wButtons & mask) != 0
-                        events.append(type('obj', (object,), {'code': code, 'state': int(state)})())
+                btns = [
+                    ("BTN_SOUTH", 0x0001), ("BTN_EAST", 0x0002),
+                    ("BTN_NORTH", 0x0010), ("BTN_WEST", 0x0008)
+                ]
+                for code, mask in btns:
+                    state = (gp.wButtons & mask) != 0
+                    events.append(type('obj', (object,), {'code': code, 'state': int(state)})())
 
-                    # Sticks
-                    deadzone = prefs.deadzone * 32767
-                    for code, val in [
-                        ("ABS_X", gp.sThumbLX), ("ABS_Y", -gp.sThumbLY),
-                        ("ABS_RX", gp.sThumbRX), ("ABS_RY", -gp.sThumbRY)
-                    ]:
-                        if abs(val) > deadzone:
-                            events.append(type('obj', (object,), {
-                                'code': code,
-                                'state': int(val * 32767 / 32768)
-                            })())
+                deadzone = prefs.deadzone * 32767
+                for code, val in [
+                    ("ABS_X", gp.sThumbLX), ("ABS_Y", -gp.sThumbLY),
+                    ("ABS_RX", gp.sThumbRX), ("ABS_RY", -gp.sThumbRY)
+                ]:
+                    if abs(val) > deadzone:
+                        events.append(type('obj', (object,), {
+                            'code': code,
+                            'state': int(val * 32767 / 32768)
+                        })())
 
             else:  # Fallback
                 return {'PASS_THROUGH'}
@@ -219,16 +207,13 @@ class WM_OT_toggle_controller_mode(Operator):
 
         now = bpy.context.scene.frame_current / bpy.context.scene.render.fps if hasattr(bpy.context.scene, "frame_current") else 0.0
 
-        # Update pressed keys
         for evt in events:
             code = evt.code
-            if evt.state == 1:  # Pressed (for buttons)
+            if evt.state == 1:  # Pressed (buttons)
                 self.pressed_keys.add(code)
             elif "ABS" in code:
-                # Analog keys always "pressed" when active
                 self.pressed_keys.add(code)
 
-        # Check combos
         for i, combo in enumerate(prefs.combos):
             combo_keys = {k.value for k in combo.keys}
             if combo_keys.issubset(self.pressed_keys):
@@ -237,7 +222,6 @@ class WM_OT_toggle_controller_mode(Operator):
             else:
                 self.combo_start_times.pop(i, None)
 
-        # Execute combos past hold time
         for i, combo in enumerate(prefs.combos):
             start_time = self.combo_start_times.get(i)
             if start_time is not None and (now - start_time) >= combo.hold_time:
@@ -251,9 +235,8 @@ class WM_OT_toggle_controller_mode(Operator):
             del self.combo_start_times[idx]
 
         try:
-            import json
-            args = json.loads(combo.args_json) if combo.args_json else {}
-        except Exception as e:
+            args = __import__('json').loads(combo.args_json) if combo.args_json else {}
+        except Exception:
             return
 
         try:
@@ -330,6 +313,7 @@ class VIEW3D_PT_controller_mapper(Panel):
 
 
 classes = (
+    ControllerKey,
     ControllerComboMapping,
     ControllerMapping,
     ControllerMapperPreferences,
