@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Xbox Controller Mapper",
     "author": "You",
-    "version": (2, 1),
+    "version": (2, 2),
     "blender": (5, 0, 0),
     "location": "View3D > Sidebar > Controller Mapper",
     "category": "Input"
@@ -14,61 +14,73 @@ from bpy.props import (
 )
 from bpy.types import Panel, Operator, AddonPreferences, PropertyGroup
 
-# === XInput Fallback (Windows only) ===
+# === XInput (Windows only) ===
 XINPUT_AVAILABLE = False
 try:
-    if platform := __import__('platform').system() == "Windows":
-        class XINPUT_GAMEPAD(ctypes.Structure):
-            _fields_ = [
-                ("wButtons", ctypes.c_ushort),
-                ("bLeftTrigger", ctypes.c_byte),
-                ("bRightTrigger", ctypes.c_byte),
-                ("sThumbLX", ctypes.c_short),
-                ("sThumbLY", ctypes.c_short),
-                ("sThumbRX", ctypes.c_short),
-                ("sThumbRY", ctypes.c_short),
-            ]
+    import ctypes
+    from ctypes import wintypes
 
-        class XINPUT_STATE(ctypes.Structure):
-            _fields_ = [
-                ("dwPacketNumber", ctypes.c_uint32),
-                ("Gamepad", XINPUT_GAMEPAD)
-            ]
+    class XINPUT_GAMEPAD(ctypes.Structure):
+        _fields_ = [
+            ("wButtons", wintypes.WORD),
+            ("bLeftTrigger", wintypes.BYTE),
+            ("bRightTrigger", wintypes.BYTE),
+            ("sThumbLX", wintypes.SHORT),
+            ("sThumbLY", wintypes.SHORT),
+            ("sThumbRX", wintypes.SHORT),
+            ("sThumbRY", wintypes.SHORT),
+        ]
 
-        xinput = __import__('ctypes').WinDLL("XInput1_4.dll")
+    class XINPUT_STATE(ctypes.Structure):
+        _fields_ = [
+            ("dwPacketNumber", wintypes.DWORD),
+            ("Gamepad", XINPUT_GAMEPAD)
+        ]
+
+    # Try multiple DLL names (some systems use 9.1.0, some 4.0)
+    dll_names = ["XInput1_4.dll", "XInput9_1_0.dll"]
+    xinput = None
+    for name in dll_names:
+        try:
+            xinput = ctypes.WinDLL(name)
+            break
+        except OSError:
+            continue
+
+    if xinput:
         xinput.XInputGetState.argtypes = [ctypes.c_uint, ctypes.POINTER(XINPUT_STATE)]
-        xinput.XInputGetState.restype = ctypes.c_uint
+        xinput.XInputGetState.restype = wintypes.DWORD
 
         def get_xinput_state(user_index=0):
             state = XINPUT_STATE()
-            if xinput.XInputGetState(user_index, ctypes.byref(state)) == 0:
-                return state
-            return None
+            result = xinput.XInputGetState(user_index, ctypes.byref(state))
+            return state if result == 0 else None
 
         XINPUT_AVAILABLE = True
+    else:
+        print("⚠️  XInput DLL not found (tried:", ", ".join(dll_names), ")")
+
 except Exception as e:
-    XINPUT_AVAILABLE = False
+    print(f"❌ XInput initialization failed: {e}")
 
 
-# === FIXED: Key wrapper for collections ===
+# === Property Groups ===
 class ControllerKey(PropertyGroup):
     value: StringProperty(name="Key", default="")
 
 
-# === Combo Mapping ===
 class ControllerComboMapping(PropertyGroup):
-    name: StringProperty(name="Combo Name", default="")
-    keys: CollectionProperty(type=ControllerKey)  # ✅ Now valid!
-    operator: StringProperty(name="Operator ID", default="")
-    args_json: StringProperty(name="Args (JSON)", default='{}')
+    name: StringProperty(default="")
+    keys: CollectionProperty(type=ControllerKey)
+    operator: StringProperty(default="")
+    args_json: StringProperty(default='{}')
     hold_time: FloatProperty(default=0.2, min=0.05, max=2.0)
 
 
-# === Main Mapping ===
 class ControllerMapping(PropertyGroup):
-    code: StringProperty(name="Event Code", default="")
-    operator: StringProperty(name="Operator ID", default="")
-    args_json: StringProperty(name="Args (JSON)", default='{}')
+    code: StringProperty(default="")
+    operator: StringProperty(default="")
+    args_json: StringProperty(default='{}')
 
 
 class ControllerMapperPreferences(AddonPreferences):
@@ -93,17 +105,15 @@ class ControllerMapperPreferences(AddonPreferences):
     combos: CollectionProperty(type=ControllerComboMapping)
     combo_index: IntProperty()
 
-    mappings: CollectionProperty(type=ControllerMapping)
-    mapping_index: IntProperty()
-
     def draw(self, context):
         layout = self.layout
 
         if not XINPUT_AVAILABLE:
             box = layout.box()
             box.alert = True
-            box.label(text="XInput only available on Windows", icon='ERROR')
-            box.operator("wm.open_url", text="Learn More").url = "https://docs.microsoft.com/en-us/windows/win32/xinput/"
+            box.label(text="XInput initialization failed", icon='ERROR')
+            box.label(text=f"Details: {', '.join(dll_names) if 'dll_names' in dir() else 'Unknown'}")
+            box.operator("wm.open_url", text="Install XInput Drivers").url = "https://support.microsoft.com/en-us/windows/xbox-one-gamepad-drivers-6a2f7e5c-9b1d-4a8e-aa0a-3e3e3e3e3e3e"
 
         row = layout.row(align=True)
         row.prop(self, "preset", text="")
@@ -133,15 +143,13 @@ class WM_OT_controller_preset_apply(Operator):
             prefs.deadzone = 0.12
 
             c = prefs.combos.add()
-            c.name = "Maya Pan"
-            k1, k2, k3 = [c.keys.add() for _ in range(3)]
-            k1.value, k2.value, k3.value = "ABS_X", "ABS_Y", "BTN_SOUTH"
+            c.name, k = "Maya Pan", [c.keys.add() for _ in range(3)]
+            k[0].value, k[1].value, k[2].value = "ABS_X", "ABS_Y", "BTN_SOUTH"
             c.operator, c.args_json, c.hold_time = "view3d.view_pan", '{"offset": [0, 50]}', 0.2
 
             c = prefs.combos.add()
-            c.name = "Maya Orbit"
-            k1, k2, k3 = [c.keys.add() for _ in range(3)]
-            k1.value, k2.value, k3.value = "ABS_X", "ABS_Y", "BTN_EAST"
+            c.name, k = "Maya Orbit", [c.keys.add() for _ in range(3)]
+            k[0].value, k[1].value, k[2].value = "ABS_X", "ABS_Y", "BTN_EAST"
             c.operator, c.args_json, c.hold_time = "view3d.view_rotate", '{}', 0.2
 
         elif prefs.preset == "unity":
@@ -156,7 +164,6 @@ class WM_OT_controller_preset_apply(Operator):
         return {'FINISHED'}
 
 
-# === Input Polling (XInput only) ===
 class WM_OT_toggle_controller_mode(Operator):
     bl_idname = "wm.toggle_controller_mode"
     bl_label = "Toggle Controller Mode"
@@ -177,14 +184,16 @@ class WM_OT_toggle_controller_mode(Operator):
                 gp = state.Gamepad
                 events = []
 
+                # Buttons
                 btns = [
                     ("BTN_SOUTH", 0x0001), ("BTN_EAST", 0x0002),
                     ("BTN_NORTH", 0x0010), ("BTN_WEST", 0x0008)
                 ]
                 for code, mask in btns:
-                    state = (gp.wButtons & mask) != 0
-                    events.append(type('obj', (object,), {'code': code, 'state': int(state)})())
+                    pressed = (gp.wButtons & mask) != 0
+                    events.append(type('obj', (object,), {'code': code, 'state': int(pressed)})())
 
+                # Analog sticks (deadzone-aware)
                 deadzone = prefs.deadzone * 32767
                 for code, val in [
                     ("ABS_X", gp.sThumbLX), ("ABS_Y", -gp.sThumbLY),
@@ -196,7 +205,7 @@ class WM_OT_toggle_controller_mode(Operator):
                             'state': int(val * 32767 / 32768)
                         })())
 
-            else:  # Fallback
+            else:  # No controller connected or XInput not working
                 return {'PASS_THROUGH'}
 
         except Exception as e:
@@ -207,13 +216,15 @@ class WM_OT_toggle_controller_mode(Operator):
 
         now = bpy.context.scene.frame_current / bpy.context.scene.render.fps if hasattr(bpy.context.scene, "frame_current") else 0.0
 
+        # Update pressed keys state
         for evt in events:
             code = evt.code
-            if evt.state == 1:  # Pressed (buttons)
+            if evt.state == 1:  # Button press
                 self.pressed_keys.add(code)
             elif "ABS" in code:
                 self.pressed_keys.add(code)
 
+        # Check combos
         for i, combo in enumerate(prefs.combos):
             combo_keys = {k.value for k in combo.keys}
             if combo_keys.issubset(self.pressed_keys):
@@ -222,6 +233,7 @@ class WM_OT_toggle_controller_mode(Operator):
             else:
                 self.combo_start_times.pop(i, None)
 
+        # Execute combos past hold time
         for i, combo in enumerate(prefs.combos):
             start_time = self.combo_start_times.get(i)
             if start_time is not None and (now - start_time) >= combo.hold_time:
@@ -262,8 +274,10 @@ class WM_OT_toggle_controller_mode(Operator):
 
         bpy.ops.wm.controller_preset_apply()
 
+        # Test controller connection
         try:
-            get_xinput_state()  # test connection
+            if not get_xinput_state():
+                self.report({'WARNING'}, "Controller found but disconnected or unresponsive.")
         except Exception as e:
             self.report({'ERROR'}, f"Controller not found: {e}")
             return {'CANCELLED'}
