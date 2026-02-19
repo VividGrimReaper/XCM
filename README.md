@@ -7,22 +7,5 @@ an Xbox controller mapper f Blender
 
 Turn your Xbox Elite 2 (or any XInput controller) into a full-featured navigation & tool controller—no keyboard required!
 
-✅ Works with **Blender 4.1+**  
-✅ Real-time, low-latency polling (~60 Hz)  
-✅ Customizable button mappings + fine-tuning sliders  
-✅ Built-in documentation in Blender — no browser needed
+Using this as a way to learn and become comfortable with git while also configuring and learning local Vibe coding.
 
----
-
-## 🚀 Quick Start
-
-### 1️⃣ Install the Add-on
-- In Blender: **Edit → Preferences → Add-ons → Install…**  
-- Select `controller_mapper.py`  
-- ✅ Enable it (checkbox on right)
-
-### 2️⃣ Install `inputs` Library *(One-time setup)*
-Open **PowerShell as Administrator**, then run:
-```powershell
-cd "C:\Program Files\Blender Foundation\Blender\4.1\python"
-.\bin\python.exe -m pip install inputs
