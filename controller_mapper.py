@@ -1,368 +1,298 @@
 bl_info = {
     "name": "Xbox Controller Mapper",
-    "author": "Blender User + AI Assistant",
-    "version": (1, 0, 3),
-    "blender": (4, 1, 0),
-    "location": "View3D > Sidebar > Controller",
-    "description": "Use Xbox controller with persistent, customizable mappings & fine-tuning",
+    "author": "You",
+    "version": (2, 0),
+    "blender": (5, 0, 0),
+    "location": "View3D > Sidebar > Controller Mapper",
     "category": "Input"
 }
 
 import bpy
-import os
-import json
-import webbrowser
-from pathlib import Path
 from bpy.props import (
-    BoolProperty,
-    FloatProperty,
-    EnumProperty,
-    StringProperty,
-    CollectionProperty
+    BoolProperty, FloatProperty, EnumProperty,
+    StringProperty, CollectionProperty, IntProperty
 )
 from bpy.types import Panel, Operator, AddonPreferences, PropertyGroup
 
+# === XInput Fallback (Windows only) ===
+XINPUT_AVAILABLE = False
+try:
+    if bpy.app.version >= (5, 0, 0):
+        # Future-proof: check for native input devices first
+        try:
+            _devices = list(bpy.context.window_manager.input_devices)
+            if any("Xbox" in dev.name for dev in _devices):
+                XINPUT_AVAILABLE = "native"
+        except Exception:
+            pass
 
-# --- Utility: Paths ---
-def get_presets_dir():
-    return Path(bpy.utils.user_resource('CONFIG', path='controller_mapper')) / "presets"
+    if not XINPUT_AVAILABLE:
+        import ctypes, platform
+        if platform.system() == "Windows":
+            class XINPUT_GAMEPAD(ctypes.Structure):
+                _fields_ = [
+                    ("wButtons", ctypes.c_ushort),
+                    ("bLeftTrigger", ctypes.c_byte),
+                    ("bRightTrigger", ctypes.c_byte),
+                    ("sThumbLX", ctypes.c_short),
+                    ("sThumbLY", ctypes.c_short),
+                    ("sThumbRX", ctypes.c_short),
+                    ("sThumbRY", ctypes.c_short),
+                ]
 
+            class XINPUT_STATE(ctypes.Structure):
+                _fields_ = [
+                    ("dwPacketNumber", ctypes.c_uint32),
+                    ("Gamepad", XINPUT_GAMEPAD)
+                ]
 
-def ensure_preset_dir():
-    d = get_presets_dir()
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+            xinput = ctypes.WinDLL("XInput1_4.dll")
+            xinput.XInputGetState.argtypes = [ctypes.c_uint, ctypes.POINTER(XINPUT_STATE)]
+            xinput.XInputGetState.restype = ctypes.c_uint
 
+            def get_xinput_state(user_index=0):
+                state = XINPUT_STATE()
+                if xinput.XInputGetState(user_index, ctypes.byref(state)) == 0:
+                    return state
+                return None
 
-# --- Preset Management System ---
-class ControllerMapperPreset(PropertyGroup):
-    name: StringProperty(name="Preset Name", default="My Mapping")
-    btn_south_op: StringProperty(default="view3d.select_mouse")
-    btn_east_op: StringProperty(default="wm.undo")
-    btn_north_op: StringProperty(default="render.render")
-    btn_west_op: StringProperty(default="wm.save_mainfile")
-
-
-class WM_OT_controller_save_preset(Operator):
-    bl_idname = "wm.controller_save_preset"
-    bl_label = "Save Current Mappings as Preset"
-    
-    name: StringProperty(name="Preset Name", default="New Mapping")
-
-    def execute(self, context):
-        prefs = context.preferences.addons[__name__].preferences
-        preset_dir = ensure_preset_dir()
-        
-        # Build preset data from current preferences
-        preset_data = {
-            "version": 1,
-            "btn_south_op": prefs.map_BTN_SOUTH_op,
-            "btn_east_op": prefs.map_BTN_EAST_op,
-            "btn_north_op": prefs.map_BTN_NORTH_op,
-            "btn_west_op": prefs.map_BTN_WEST_op,
-        }
-        
-        # Sanitize filename
-        safe_name = "".join(c if c.isalnum() or c in (' ', '-', '_') else '_' for c in self.name).strip()
-        filepath = preset_dir / f"{safe_name}.json"
-        
-        with open(filepath, 'w', encoding='utf-8') as f:
-            json.dump(preset_data, f, indent=2)
-
-        self.report({'INFO'}, f"Preset saved: {filepath}")
-        return {'FINISHED'}
-
-    def invoke(self, context, event):
-        wm = context.window_manager
-        return wm.invoke_props_dialog(self)
-
-
-class WM_OT_controller_load_preset(Operator):
-    bl_idname = "wm.controller_load_preset"
-    bl_label = "Load Preset"
-    
-    preset_name: EnumProperty(
-        name="Preset",
-        items=lambda self, ctx: [
-            (p.stem, p.stem.replace('_', ' ').title(), "") 
-            for p in get_presets_dir().glob("*.json") if p.exists()
-        ] or [("(none)", "No presets found", "")]
-    )
-
-    def execute(self, context):
-        preset_path = get_presets_dir() / f"{self.preset_name}.json"
-        
-        if not preset_path.exists():
-            self.report({'ERROR'}, "Preset file missing!")
-            return {'CANCELLED'}
-            
-        with open(preset_path) as f:
-            data = json.load(f)
-        
-        prefs = context.preferences.addons[__name__].preferences
-        # Apply loaded mappings to preferences (which auto-update UI)
-        if 'btn_south_op' in data:
-            prefs.map_BTN_SOUTH_op = data['btn_south_op']
-        if 'btn_east_op' in data:
-            prefs.map_BTN_EAST_op = data['btn_east_op']
-        if 'btn_north_op' in data:
-            prefs.map_BTN_NORTH_op = data['btn_north_op']
-        if 'btn_west_op' in data:
-            prefs.map_BTN_WEST_op = data['btn_west_op']
-
-        self.report({'INFO'}, f"Preset loaded: {self.preset_name}")
-        return {'FINISHED'}
-
-    def invoke(self, context, event):
-        # Ensure at least one item exists to avoid enum error
-        if not list(get_presets_dir().glob("*.json")):
-            self.report({'WARNING'}, "No presets found. Save one first!")
-            return {'CANCELLED'}
-        
-        wm = context.window_manager
-        return wm.invoke_props_dialog(self)
-
-
-class WM_OT_controller_delete_preset(Operator):
-    bl_idname = "wm.controller_delete_preset"
-    bl_label = "Delete Preset"
-    
-    preset_name: EnumProperty(
-        name="Preset",
-        items=lambda self, ctx: [
-            (p.stem, p.stem.replace('_', ' ').title(), "") 
-            for p in get_presets_dir().glob("*.json") if p.exists()
-        ] or [("(none)", "No presets to delete", "")]
-    )
-
-    def execute(self, context):
-        preset_path = get_presets_dir() / f"{self.preset_name}.json"
-        if preset_path.exists():
-            preset_path.unlink()
-            self.report({'INFO'}, f"Deleted preset: {self.preset_name}")
+            XINPUT_AVAILABLE = True
         else:
-            self.report({'WARNING'}, "Preset not found.")
-        return {'FINISHED'}
-
-    def invoke(self, context, event):
-        if not list(get_presets_dir().glob("*.json")):
-            self.report({'WARNING'}, "No presets to delete!")
-            return {'CANCELLED'}
-        
-        wm = context.window_manager
-        return wm.invoke_props_dialog(self)
+            print("⚠️  XInput only supported on Windows in this build.")
+except Exception as e:
+    XINPUT_AVAILABLE = False
 
 
-# --- Main Addon Preferences (with persistent mappings) ---
+# === Combo Mapping ===
+class ControllerComboMapping(PropertyGroup):
+    name: StringProperty(name="Combo Name", default="")
+    keys: CollectionProperty(type=StringProperty)
+    operator: StringProperty(name="Operator ID", default="")
+    args_json: StringProperty(name="Args (JSON)", default='{}')
+    hold_time: FloatProperty(default=0.2, min=0.05, max=2.0)
+
+
+# === Main Mapping ===
+class ControllerMapping(PropertyGroup):
+    code: StringProperty(name="Event Code", default="")
+    operator: StringProperty(name="Operator ID", default="")
+    args_json: StringProperty(name="Args (JSON)", default='{}')
+
+
 class ControllerMapperPreferences(AddonPreferences):
     bl_idname = __name__
 
-    enable_controller: BoolProperty(
-        name="Enable Controller",
-        default=False,
-        description="Toggle Xbox controller input override"
+    enable_controller: BoolProperty(default=False)
+    show_preview: BoolProperty(default=True)
+
+    axis_sensitivity: FloatProperty(default=1.0, min=0.1, max=5.0)
+    deadzone: FloatProperty(default=0.15, min=0.0, max=0.9)
+
+    preset: EnumProperty(
+        name="Preset",
+        items=[
+            ("custom", "Custom", "", 0),
+            ("maya", "Maya Navigation", "", 1),
+            ("unity", "Unity Camera", "", 3),
+        ],
+        default="custom"
     )
 
-    axis_sensitivity: FloatProperty(
-        name="Axis Sensitivity", default=1.0, min=0.1, max=5.0
-    )
-    
-    deadzone: FloatProperty(name="Deadzone", default=0.2, min=0.0, max=0.9)
+    combos: CollectionProperty(type=ControllerComboMapping)
+    combo_index: IntProperty()
 
-    # Mappings stored *directly* in preferences (Blender auto-saves these!)
-    map_BTN_SOUTH_op: EnumProperty(
-        name="A Button",
-        items=[
-            ('view3d.select_mouse', 'Select', ''),
-            ('wm.undo', 'Undo', ''),
-            ('wm.redo', 'Redo', '')
-        ],
-        default='view3d.select_mouse'
-    )
-    
-    map_BTN_EAST_op: EnumProperty(
-        name="B Button",
-        items=[
-            ('wm.undo', 'Undo', ''),
-            ('wm.redo', 'Redo', ''),
-            ('view3d.select_box', 'Box Select', '')
-        ],
-        default='wm.undo'
-    )
-
-    map_BTN_NORTH_op: EnumProperty(
-        name="Y Button",
-        items=[
-            ('render.render', 'Render Image', ''),
-            ('wm.save_mainfile', 'Save', '')
-        ],
-        default='render.render'
-    )
-    
-    map_BTN_WEST_op: EnumProperty(
-        name="X Button",
-        items=[
-            ('wm.save_mainfile', 'Save', ''),
-            ('render.render', 'Render Image', '')
-        ],
-        default='wm.save_mainfile'
-    )
+    mappings: CollectionProperty(type=ControllerMapping)
+    mapping_index: IntProperty()
 
     def draw(self, context):
         layout = self.layout
-        
-        # Global toggle
+
+        if not XINPUT_AVAILABLE:
+            box = layout.box()
+            box.alert = True
+            box.label(text="XInput not available", icon='ERROR')
+            box.label(text="Windows only for raw controller access")
+            box.operator("wm.open_url", text="Learn More").url = "https://docs.microsoft.com/en-us/windows/win32/xinput/"
+
         row = layout.row(align=True)
-        if self.enable_controller:
-            row.operator("wm.toggle_controller_mode", text="Disable Controller", icon='CHECKBOX_HLT')
-        else:
-            row.operator("wm.toggle_controller_mode", text="Enable Controller", icon='CHECKBOX_DEHLT')
+        row.prop(self, "preset", text="")
+        if self.preset != "custom":
+            row.operator("wm.controller_preset_apply", text="", icon='PLAY')
 
-        # Tuning
+        col = layout.column(align=True)
+        col.prop(self, "enable_controller")
+        if XINPUT_AVAILABLE:
+            col.prop(self, "axis_sensitivity")
+            col.prop(self, "deadzone")
+
         box = layout.box()
-        box.label(text="Tuning", icon='MODIFIER')
-        box.prop(self, "axis_sensitivity")
-        box.prop(self, "deadzone")
-
-        # Preset management (NEW!)
-        box = layout.box()
-        row = box.row(align=True)
-        row.label(text="Presets", icon='FILE_REFRESH')
-        
-        sub = row.row(align=True)
-        sub.operator("wm.controller_save_preset", text="", icon='ADD')
-        sub.operator("wm.controller_load_preset", text="", icon='LOAD_FACTORY')
-        sub.operator("wm.controller_delete_preset", text="", icon='TRASH')
-
-        # Mappings
-        box = layout.box()
-        box.label(text="Button Mappings", icon='MOUSE_LMB')
-        col = box.column(align=True)
-        
-        row = col.row(align=True)
-        row.label(text="A (South)")
-        row.prop(self, "map_BTN_SOUTH_op", text="")
-        
-        row = col.row(align=True)
-        row.label(text="B (East)")
-        row.prop(self, "map_BTN_EAST_op", text="")
-        
-        row = col.row(align=True)
-        row.label(text="Y (North)")
-        row.prop(self, "map_BTN_NORTH_op", text="")
-        
-        row = col.row(align=True)
-        row.label(text="X (West)")
-        row.prop(self, "map_BTN_WEST_op", text="")
-
-        # Docs link
-        box = layout.box()
-        box.operator("wm.open_controller_docs", icon='HELP')
+        box.prop(self, "show_preview", icon='HIDE_OFF')
 
 
-# --- Core Modal Operator ---
+class WM_OT_controller_preset_apply(Operator):
+    bl_idname = "wm.controller_preset_apply"
+    bl_label = "Apply Preset"
+
+    def execute(self, context):
+        prefs = context.preferences.addons[__name__].preferences
+        prefs.combos.clear()
+
+        if prefs.preset == "maya":
+            prefs.axis_sensitivity = 0.8
+            prefs.deadzone = 0.12
+
+            c = prefs.combos.add()
+            c.name, k1, k2, k3 = "Maya Pan", *([c.keys.add() for _ in range(3)])
+            k1.value, k2.value, k3.value = "ABS_X", "ABS_Y", "BTN_SOUTH"
+            c.operator, c.args_json, c.hold_time = "view3d.view_pan", '{"offset": [0, 50]}', 0.2
+
+            c = prefs.combos.add()
+            c.name, k1, k2, k3 = "Maya Orbit", *([c.keys.add() for _ in range(3)])
+            k1.value, k2.value, k3.value = "ABS_X", "ABS_Y", "BTN_EAST"
+            c.operator, c.args_json, c.hold_time = "view3d.view_rotate", '{}', 0.2
+
+        elif prefs.preset == "unity":
+            prefs.axis_sensitivity = 1.2
+            prefs.deadzone = 0.15
+
+            for axis in [("ABS_X", "move X"), ("ABS_Y", "move Y")]:
+                c = prefs.combos.add()
+                c.name, k = f"Unity {axis[1]}", c.keys.add()
+                k.value, c.operator, c.hold_time = axis[0], "view3d.view_pan", 0.0
+
+        return {'FINISHED'}
+
+
+# === Input Polling (XInput or fallback) ===
 class WM_OT_toggle_controller_mode(Operator):
     bl_idname = "wm.toggle_controller_mode"
     bl_label = "Toggle Controller Mode"
 
     _timer = None
+    _active = False
+    pressed_keys: set()
+    combo_start_times: dict
 
     def modal(self, context, event):
         prefs = context.preferences.addons[__name__].preferences
-        
-        if not prefs.enable_controller:
+
+        if not self._active:
             return {'PASS_THROUGH'}
 
+        # Poll XInput state (Windows only)
         try:
-            import inputs
-        except ImportError:
-            self.report({'ERROR'}, "Missing 'inputs' library. Install with: pip install inputs")
-            prefs.enable_controller = False
-            return {'CANCELLED'}
+            if XINPUT_AVAILABLE and isinstance(XINPUT_AVAILABLE, bool):
+                state = get_xinput_state()
+                if state:
+                    gp = state.Gamepad
+                    events = []
 
-        try:
-            events = inputs.get_gamepad()
-            for event in events:
-                if hasattr(event, 'code') and hasattr(event, 'state'):
-                    op_name = None
+                    # Buttons
+                    btns = [
+                        ("BTN_SOUTH", 0x0001), ("BTN_EAST", 0x0002),
+                        ("BTN_NORTH", 0x0010), ("BTN_WEST", 0x0008)
+                    ]
+                    for code, mask in btns:
+                        state = (gp.wButtons & mask) != 0
+                        events.append(type('obj', (object,), {'code': code, 'state': int(state)})())
 
-                    # Button mapping (uses live preferences)
-                    if event.code == "BTN_SOUTH" and event.state == 1:
-                        op_name = prefs.map_BTN_SOUTH_op
-                    elif event.code == "BTN_EAST" and event.state == 1:
-                        op_name = prefs.map_BTN_EAST_op
-                    elif event.code == "BTN_NORTH" and event.state == 1:
-                        op_name = prefs.map_BTN_NORTH_op
-                    elif event.code == "BTN_WEST" and event.state == 1:
-                        op_name = prefs.map_BTN_WEST_op
+                    # Sticks
+                    deadzone = prefs.deadzone * 32767
+                    for code, val in [
+                        ("ABS_X", gp.sThumbLX), ("ABS_Y", -gp.sThumbLY),
+                        ("ABS_RX", gp.sThumbRX), ("ABS_RY", -gp.sThumbRY)
+                    ]:
+                        if abs(val) > deadzone:
+                            events.append(type('obj', (object,), {
+                                'code': code,
+                                'state': int(val * 32767 / 32768)
+                            })())
 
-                    if op_name:
-                        try:
-                            op_module, op_id = op_name.split('.')
-                            getattr(getattr(bpy.ops, op_module), op_id)('INVOKE_DEFAULT')
-                        except Exception as e:
-                            self.report({'WARNING'}, f"Operator '{op_name}' failed: {e}")
-
-                    # Analog stick handling
-                    elif event.code in ("ABS_Y", "ABS_X"):
-                        val = event.state / 32767.0
-                        if abs(val) > prefs.deadzone:
-                            sens = prefs.axis_sensitivity * (abs(val) - prefs.deadzone) / (1 - prefs.deadzone)
-                            if event.code == "ABS_Y":
-                                bpy.ops.view3d.view_pan('INVOKE_DEFAULT', offset=(0, val * 40 * sens))
-                            elif event.code == "ABS_X":
-                                bpy.ops.view3d.view_rotate('INVOKE_DEFAULT', mouse_x=0, mouse_y=0)
+            else:  # Fallback
+                return {'PASS_THROUGH'}
 
         except Exception as e:
             self.report({'WARNING'}, f"Controller error: {e}")
             prefs.enable_controller = False
+            self._active = False
+            return {'FINISHED'}
+
+        now = bpy.context.scene.frame_current / bpy.context.scene.render.fps if hasattr(bpy.context.scene, "frame_current") else 0.0
+
+        # Update pressed keys
+        for evt in events:
+            code = evt.code
+            if evt.state == 1:  # Pressed (for buttons)
+                self.pressed_keys.add(code)
+            elif "ABS" in code:
+                # Analog keys always "pressed" when active
+                self.pressed_keys.add(code)
+
+        # Check combos
+        for i, combo in enumerate(prefs.combos):
+            combo_keys = {k.value for k in combo.keys}
+            if combo_keys.issubset(self.pressed_keys):
+                if i not in self.combo_start_times:
+                    self.combo_start_times[i] = now
+            else:
+                self.combo_start_times.pop(i, None)
+
+        # Execute combos past hold time
+        for i, combo in enumerate(prefs.combos):
+            start_time = self.combo_start_times.get(i)
+            if start_time is not None and (now - start_time) >= combo.hold_time:
+                self._execute_combo(context, combo, now)
 
         return {'PASS_THROUGH'}
 
+    def _execute_combo(self, context, combo, now):
+        idx = next((k for k, v in self.combo_start_times.items() if v == now - combo.hold_time), None)
+        if idx is not None:
+            del self.combo_start_times[idx]
+
+        try:
+            import json
+            args = json.loads(combo.args_json) if combo.args_json else {}
+        except Exception as e:
+            return
+
+        try:
+            op_name, space_type = combo.operator.split(".", 1)
+            getattr(getattr(bpy.ops, op_name), space_type)(**args)
+        except Exception:
+            pass
+
+
     def execute(self, context):
-        import inputs
-        if not hasattr(inputs, 'get_gamepad'):
-            try:
-                import inputs as _inputs
-                globals()['inputs'] = _inputs
-            except ImportError:
-                self.report({'ERROR'}, "Missing 'inputs' library")
-                return {'CANCELLED'}
-        
         prefs = context.preferences.addons[__name__].preferences
 
-        if not prefs.enable_controller:
-            try:
-                devices = inputs.get_gamepad()
-                if not devices:
-                    self.report({'WARNING'}, "No controller found.")
-                    return {'CANCELLED'}
-            except Exception as e:
-                self.report({'ERROR'}, f"Failed to detect controller: {e}")
-                return {'CANCELLED'}
+        if not XINPUT_AVAILABLE:
+            self.report({'ERROR'}, "XInput not available (Windows only)")
+            return {'CANCELLED'}
 
-            wm = context.window_manager
-            self._timer = wm.event_timer_add(0.016, window=context.window)
-            wm.modal_handler_add(self)
-            prefs.enable_controller = True
-            return {'RUNNING_MODAL'}
-        else:
+        if prefs.enable_controller:
             prefs.enable_controller = False
+            self._active = False
+            self.pressed_keys.clear()
+            self.combo_start_times.clear()
             return {'FINISHED'}
 
+        bpy.ops.wm.controller_preset_apply()
 
-class WM_OT_open_controller_docs(Operator):
-    bl_idname = "wm.open_controller_docs"
-    bl_label = "Open Documentation"
+        try:
+            get_xinput_state()  # test connection
+        except Exception as e:
+            self.report({'ERROR'}, f"Controller not found: {e}")
+            return {'CANCELLED'}
 
-    def execute(self, context):
-        addon_dir = Path(__file__).parent
-        readme_path = addon_dir / "README.md"
-        if readme_path.exists():
-            webbrowser.open(f"file://{readme_path}")
-        else:
-            self.report({'WARNING'}, "README.md not found!")
-        return {'FINISHED'}
+        prefs.enable_controller = True
+        self._active = True
+
+        wm = context.window_manager
+        self._timer = wm.event_timer_add(0.016, window=context.window)
+        wm.modal_handler_add(self)
+
+        return {'RUNNING_MODAL'}
 
 
 class VIEW3D_PT_controller_mapper(Panel):
@@ -375,30 +305,61 @@ class VIEW3D_PT_controller_mapper(Panel):
     def draw(self, context):
         layout = self.layout
         prefs = context.preferences.addons[__name__].preferences
-        
+
         row = layout.row(align=True)
-        if prefs.enable_controller:
-            row.operator("wm.toggle_controller_mode", text="Disable Controller", icon='CHECKBOX_HLT')
-        else:
-            row.operator("wm.toggle_controller_mode", text="Enable Controller", icon='CHECKBOX_DEHLT')
+        row.prop(prefs, "preset", text="")
+        if prefs.preset != "custom":
+            row.operator("wm.controller_preset_apply", text="Apply")
+
+        row = layout.row(align=True)
+        icon = 'CHECKBOX_HLT' if prefs.enable_controller else 'CHECKBOX_DEHLT'
+        row.operator(
+            "wm.toggle_controller_mode",
+            text="Disable Controller" if prefs.enable_controller else "Enable Controller",
+            icon=icon
+        )
+
+        box = layout.box()
+        box.label(text="Tuning")
+        if XINPUT_AVAILABLE:
+            box.prop(prefs, "axis_sensitivity")
+            box.prop(prefs, "deadzone")
+
+        row = layout.row(align=True)
+        row.prop(prefs, "show_preview", icon='HIDE_OFF')
 
 
 classes = (
+    ControllerComboMapping,
+    ControllerMapping,
     ControllerMapperPreferences,
-    WM_OT_toggle_controller_mode,
     VIEW3D_PT_controller_mapper,
-    WM_OT_open_controller_docs,
-    WM_OT_controller_save_preset,
-    WM_OT_controller_load_preset,
-    WM_OT_controller_delete_preset,
+    WM_OT_toggle_controller_mode,
+    WM_OT_controller_preset_apply,
 )
+
 
 def register():
     for cls in classes:
         bpy.utils.register_class(cls)
 
+    wm = bpy.context.window_manager
+    kc = wm.keyconfigs.addon
+    if kc:
+        km = kc.keymaps.new(name='3D View', space_type='VIEW_3D')
+        kmi = km.keymap_items.new("wm.toggle_controller_mode", 'F12', 'PRESS', ctrl=True, shift=True)
+
 
 def unregister():
+    wm = bpy.context.window_manager
+    kc = wm.keyconfigs.addon
+    if kc:
+        km = kc.keymaps['3D View']
+        for kmi in km.keymap_items:
+            if kmi.idname == "wm.toggle_controller_mode":
+                km.keymap_items.remove(kmi)
+                break
+
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
 
