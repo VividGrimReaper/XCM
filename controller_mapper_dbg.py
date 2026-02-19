@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Xbox Controller Mapper",
     "author": "You",
-    "version": (2, 3),
+    "version": (2, 4),
     "blender": (5, 0, 0),
     "location": "View3D > Sidebar > Controller Mapper",
     "category": "Input"
@@ -202,8 +202,11 @@ class WM_OT_toggle_controller_mode(Operator):
 
     _timer = None
     _active = False
-    pressed_keys: set()
-    combo_start_times: dict
+
+    def __init__(self):
+        # Initialize here to avoid AttributeError on early access
+        self.pressed_keys = set()
+        self.combo_start_times = {}
 
     def modal(self, context, event):
         prefs = context.preferences.addons[__name__].preferences
@@ -301,11 +304,13 @@ class WM_OT_toggle_controller_mode(Operator):
             self.report({'ERROR'}, "XInput not available (Windows only)")
             return {'CANCELLED'}
 
+        # Reset state cleanly
+        self.pressed_keys.clear()
+        self.combo_start_times.clear()
+
         if prefs.enable_controller:
             prefs.enable_controller = False
             self._active = False
-            self.pressed_keys.clear()
-            self.combo_start_times.clear()
             return {'FINISHED'}
 
         bpy.ops.wm.controller_preset_apply()
@@ -330,6 +335,16 @@ class WM_OT_toggle_controller_mode(Operator):
 
         print("🎮 Controller mode enabled — press buttons to test!")
         return {'RUNNING_MODAL'}
+
+    def cancel(self, context):
+        # Clean up on cancellation (e.g., user presses ESC)
+        prefs = context.preferences.addons[__name__].preferences
+        if self._active:
+            prefs.enable_controller = False
+            self._active = False
+        if hasattr(self, '_timer') and self._timer:
+            wm = context.window_manager
+            wm.event_timer_remove(self._timer)
 
 
 class VIEW3D_PT_controller_mapper(Panel):
